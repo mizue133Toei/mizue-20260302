@@ -1,0 +1,93 @@
+# 1. 永続ストレージの定義 (作成したファイルの保存用)
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: iac-project-data
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+---
+# 2. クラスタ操作用の権限設定
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: iac-admin-sa
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: iac-admin-binding
+subjects:
+  - kind: ServiceAccount
+    name: iac-admin-sa
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: edit # クラスタ内のリソースを操作できる権限 (必要に応じて admin 等に変更)
+---
+# 3. アプリケーションのデプロイ
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: iac-vscode
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: iac-vscode
+  template:
+    metadata:
+      labels:
+        app: iac-vscode
+    spec:
+      serviceAccountName: iac-admin-sa # これによりコンテナ内で oc login 不要で操作可能に
+      securityContext: {} 
+      containers:
+        - name: code-server
+          image: quay.io/scsk-tomita/fatcontainer:0.155code # ビルドしたイメージ名に書き換えてください
+          ports:
+            - containerPort: 8081
+          volumeMounts:
+            - name: project-storage
+              mountPath: /home/devuser/project # コード保存用
+          env:
+            - name: KUBERNETES_SERVICE_HOST
+              value: "kubernetes.default.svc"
+      volumes:
+        - name: project-storage
+          persistentVolumeClaim:
+            claimName: iac-project-data
+---
+# 4. サービス定義
+apiVersion: v1
+kind: Service
+metadata:
+  name: iac-vscode-svc
+spec:
+  selector:
+    app: iac-vscode
+  ports:
+    - protocol: TCP
+      port: 8081
+      targetPort: 8081
+---
+# 5. 外部公開設定 (クラスタ外からWebアクセス)
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: iac-vscode-route
+  annotations:
+    # タイムアウトを5分に延長 (Terraform実行中などの切断防止)
+    haproxy.router.openshift.io/timeout: 5m
+spec:
+  to:
+    kind: Service
+    name: iac-vscode-svc
+  port:
+    targetPort: 8081
+  tls:
+    termination: edge # HTTPS化
+    insecureEdgeTerminationPolicy: Redirect
